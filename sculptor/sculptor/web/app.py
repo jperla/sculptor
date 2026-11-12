@@ -125,6 +125,7 @@ from sculptor.service_collections.service_collection import CompleteServiceColle
 from sculptor.services.data_model_service.data_types import DataModelTransaction
 from sculptor.services.data_model_service.data_types import TaskAndDataModelTransaction
 from sculptor.services.dependency_management_service import InstallResult
+from sculptor.services.dependency_management_service import JjIdentityError
 from sculptor.services.git_repo_service.default_implementation import LocalReadOnlyGitRepo
 from sculptor.services.git_repo_service.default_implementation import LocalWritableGitRepo
 from sculptor.services.git_repo_service.error_types import GitRepoError
@@ -236,6 +237,7 @@ from sculptor.web.data_types import HealthCheckResponse
 from sculptor.web.data_types import InitializeGitRepoRequest
 from sculptor.web.data_types import InstallExtensionRequest
 from sculptor.web.data_types import InstallExtensionResponse
+from sculptor.web.data_types import JjIdentity
 from sculptor.web.data_types import ListTerminalAgentRegistrationsResponse
 from sculptor.web.data_types import ListWorkspacesResponse
 from sculptor.web.data_types import NamingConventionFile
@@ -264,6 +266,7 @@ from sculptor.web.data_types import RecentWorkspaceResponse
 from sculptor.web.data_types import RenameAgentRequest
 from sculptor.web.data_types import RepoInfo
 from sculptor.web.data_types import SendMessageRequest
+from sculptor.web.data_types import SetJjIdentityRequest
 from sculptor.web.data_types import SetModelRequest
 from sculptor.web.data_types import SetTelemetryRequest
 from sculptor.web.data_types import SignalEventRequest
@@ -693,9 +696,7 @@ def start_task(
     prompt = task_request.prompt
     interface = task_request.interface
     model = task_request.model
-    initialization_strategy = task_request.initialization_strategy
     task_name = task_request.name
-    source_branch = task_request.source_branch
     workspace_id = task_request.workspace_id
     task_id = TaskID()
 
@@ -705,6 +706,13 @@ def start_task(
             raise HTTPException(
                 status_code=422,
                 detail=[{"loc": ["body", "prompt"], "msg": "Prompt is required", "type": "value_error.missing"}],
+            )
+        if workspace_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail=[
+                    {"loc": ["body", "workspace_id"], "msg": "Workspace is required", "type": "value_error.missing"}
+                ],
             )
 
         services = get_services_from_request_or_websocket(request)
@@ -718,9 +726,7 @@ def start_task(
                 detail=f"Invalid interface: {interface}. Must be 'terminal' or 'api'",
             ) from e
 
-        logger.info(
-            "Starting new task with interface {} and initialization_strategy {}", interface, initialization_strategy
-        )
+        logger.info("Starting new task with interface {} in workspace {}", interface, workspace_id)
 
         if model in (LLMModel.FAKE_CLAUDE, LLMModel.FAKE_CLAUDE_2) and not settings.TESTING.INTEGRATION_ENABLED:
             raise HTTPException(
@@ -734,36 +740,14 @@ def start_task(
             if project is None:
                 raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
 
-            if workspace_id is not None:
-                # Use existing workspace
-                workspace = transaction.get_workspace(workspace_id)
-                if workspace is None or workspace.is_deleted:
-                    raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
-                if workspace.project_id != project_id:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Workspace {workspace_id} belongs to a different project",
-                    )
-                logger.debug("Using existing workspace {} for task {}", workspace.object_id, task_id)
-            else:
-                # Create implicit workspace for this task
-                new_workspace_strategy = (
-                    WorkspaceInitializationStrategy.IN_PLACE
-                    if initialization_strategy is None
-                    else initialization_strategy
+            workspace = transaction.get_workspace(workspace_id)
+            if workspace is None or workspace.is_deleted:
+                raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
+            if workspace.project_id != project_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Workspace {workspace_id} belongs to a different project",
                 )
-                _validate_workspace_creation_request(
-                    services, project, new_workspace_strategy, source_branch, requested_branch_name=None
-                )
-                workspace = services.workspace_service.create_workspace(
-                    project=project,
-                    initialization_strategy=new_workspace_strategy,
-                    source_branch=source_branch,
-                    requested_branch_name=None,
-                    description=task_name,
-                    transaction=transaction,
-                )
-                logger.debug("Created workspace {} for task {}", workspace.object_id, task_id)
 
             # Prompt-ful creation is always a chat agent — terminal agents have
             # no chat stream to deliver the prompt to. Reject only an EXPLICIT
@@ -1262,7 +1246,8 @@ def get_workspace_diff(
 ) -> WorkspaceDiffResponse:
     """Get the latest diff for a workspace.
 
-    The diff shows changes from workspace.source_git_hash to current state.
+    The uncommitted diff runs from HEAD to the working tree; the target branch
+    diff runs from the merge base with workspace.target_branch to the working tree.
     Use force_refresh=true to regenerate the diff before returning.
     Use scope=vs-target-branch to include the target branch diff.
     """
@@ -2058,7 +2043,7 @@ def get_skills(
         raise HTTPException(status_code=400, detail="Either project_id or workspace_id is required")
 
     services = get_services_from_request_or_websocket(request)
-    plugin_dirs = get_plugin_dirs()
+    plugin_dirs = get_plugin_dirs("git")
 
     if workspace_id is not None:
         validated_workspace_id = validate_workspace_id(workspace_id)
@@ -3274,6 +3259,20 @@ def install_dependency(
         raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}") from e
 
     return services.dependency_management_service.install_managed(dependency)
+
+
+@router.post("/api/v1/dependencies/jj/identity")
+def set_jj_identity(
+    body: SetJjIdentityRequest,
+    request: Request,
+    user_session: UserSession = Depends(get_user_session),
+) -> DependenciesStatus:
+    """Write jj's author identity into the user's jj config and return the refreshed status."""
+    services = get_services_from_request_or_websocket(request)
+    try:
+        return services.dependency_management_service.set_jj_identity(JjIdentity(name=body.name, email=body.email))
+    except JjIdentityError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 @router.post("/api/v1/dependencies/auth")

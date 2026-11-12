@@ -24,6 +24,8 @@ import httpx
 
 from sculptor.foundation.pydantic_serialization import FrozenModel
 from sculptor.interfaces.environments.agent_execution_environment import Dependency
+from sculptor.services.jj_version import JJ_PINNED_SHA256_BY_TARGET_TRIPLE
+from sculptor.services.jj_version import JJ_PINNED_VERSION
 from sculptor.services.pi_version import PI_PINNED_VERSION
 
 
@@ -42,22 +44,25 @@ class VersionRange(FrozenModel):
 
 
 class PlatformPin(FrozenModel):
-    """One platform's pinned pi artifact: the release asset and its expected sha256."""
+    """One platform's pinned release artifact: the asset name and its expected sha256."""
 
     asset: str
     sha256: str
 
 
-class PiPin(FrozenModel):
-    """The static, in-repo source of truth for the managed pi distribution.
+class ReleasePin(FrozenModel):
+    """The static, in-repo source of truth for a tool published as per-platform release assets.
 
-    Sculptor computes pi's digests itself per version (``just bump-pi``, which
-    cross-checks upstream's published ``SHA256SUMS``) and bakes them here; the
-    install path verifies downloads against these pinned values only.
+    Sculptor computes the digests itself at each version bump, cross-checking what
+    upstream publishes, and bakes them in; the install path verifies downloads against
+    these pinned values only.
     """
 
     version: str
     platforms: dict[str, PlatformPin]
+
+
+class PiPin(ReleasePin):
     # Reserved slot, not read from user config: a constant sentinel until a pi
     # plugin set needs pinning.
     plugin_set_revision: str = "bundled"
@@ -68,15 +73,15 @@ PI_PIN = PiPin(
     platforms={
         "darwin-arm64": PlatformPin(
             asset="pi-darwin-arm64.tar.gz",
-            sha256="1f9ae61cdeae04dd68caf1a1e8ab8ec9b292062f6ccb3252e0a9cbe93b5b16f1",
+            sha256="56b5e194d485ced555667b8ba3276157a8272e9ecde9e001e428af80985bdd9b",
         ),
         "darwin-x64": PlatformPin(
             asset="pi-darwin-x64.tar.gz",
-            sha256="9ff562e2e439f50971b1f6bd9b62b30946600d9e9baa4ea19635cf630a553066",
+            sha256="f997a088613514ac97d913aeea7642094d84fe6d46854ff7e64e2c12e536dc50",
         ),
         "linux-x64": PlatformPin(
             asset="pi-linux-x64.tar.gz",
-            sha256="24f5be328b66d4da36876296989501974f43ab8434fbb57c35c523a3ea505ded",
+            sha256="811c6f2c9e7aaee252b5404252e556fb713aa209c1f7f924226aa77d4ef70cb5",
         ),
     },
 )
@@ -228,6 +233,86 @@ class PiManagedTool(ManagedTool):
         return binary
 
 
+# jj names its release assets after Rust target triples; the Linux builds are the static
+# musl ones, so they run on any distribution.
+_JJ_TARGET_TRIPLE_BY_PLATFORM_KEY: dict[str, str] = {
+    "darwin-arm64": "aarch64-apple-darwin",
+    "darwin-x64": "x86_64-apple-darwin",
+    "linux-x64": "x86_64-unknown-linux-musl",
+    "linux-arm64": "aarch64-unknown-linux-musl",
+}
+
+# The digests live in the import-free ``jj_version`` module, which tooling reads without
+# importing this one, so the pin is assembled from it here.
+JJ_PIN = ReleasePin(
+    version=JJ_PINNED_VERSION,
+    platforms={
+        platform_key: PlatformPin(
+            asset=f"jj-v{JJ_PINNED_VERSION}-{target_triple}.tar.gz",
+            sha256=JJ_PINNED_SHA256_BY_TARGET_TRIPLE[target_triple],
+        )
+        for platform_key, target_triple in _JJ_TARGET_TRIPLE_BY_PLATFORM_KEY.items()
+    },
+)
+
+_JJ_PLATFORM_MAP: dict[tuple[str, str], str] = {
+    ("darwin", "arm64"): "darwin-arm64",
+    ("darwin", "x86_64"): "darwin-x64",
+    ("linux", "x86_64"): "linux-x64",
+    ("linux", "aarch64"): "linux-arm64",
+}
+
+_JJ_RELEASE_BASE_URL = "https://github.com/jj-vcs/jj/releases/download"
+
+# The pin is also the floor, and any later 0.x is accepted so a system jj from a
+# package manager keeps working; bumping the pin raises the floor.
+JJ_VERSION_RANGE = VersionRange(
+    min_version=JJ_PINNED_VERSION,
+    max_version="0.999.999",
+    recommended_version=JJ_PINNED_VERSION,
+)
+
+# `jj --version` prints `jj 0.46.0-<40-hex commit hash>`; the shared parser would keep
+# the hash suffix, which ``packaging.Version`` rejects.
+_JJ_VERSION_LINE_PATTERN = re.compile(r"^jj (\d+\.\d+\.\d+)(?:-\S+)?$", re.MULTILINE)
+
+
+class JjManagedTool(ManagedTool):
+    """Managed-install conformer for jj (Jujutsu)."""
+
+    tool = Dependency.JJ
+    version_range = JJ_VERSION_RANGE
+    platform_keys = frozenset(_JJ_TARGET_TRIPLE_BY_PLATFORM_KEY)
+    retention_keep = 1
+    binary_subpath = "jj"
+    installs_on_startup_when_missing = False
+
+    def resolve_distribution(self) -> ResolvedDistribution:
+        platform_key = _resolve_platform_key(_JJ_PLATFORM_MAP, "jj")
+        pin = JJ_PIN.platforms[platform_key]
+        return ResolvedDistribution(
+            version=JJ_PIN.version,
+            url=f"{_JJ_RELEASE_BASE_URL}/v{JJ_PIN.version}/{pin.asset}",
+            checksum_sha256=pin.sha256,
+            size=None,
+            archive="tarball",
+            binary_subpath=self.binary_subpath,
+        )
+
+    def stage(self, downloaded: Path, version_dir: Path) -> Path:
+        # The tarball holds ``./jj`` beside its LICENSE and README; only the binary is kept.
+        version_dir.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(downloaded, "r:gz") as tar:
+            tar.extract("./jj", version_dir, filter="data")
+        binary = version_dir / self.binary_subpath
+        binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        return binary
+
+    def parse_version(self, output: str) -> str | None:
+        match = _JJ_VERSION_LINE_PATTERN.search(output)
+        return match.group(1) if match else None
+
+
 GCP_BUCKET_BASE_URL = (
     "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
 )
@@ -243,12 +328,12 @@ CLAUDE_VERSION_RANGE = VersionRange(
     # Keep the floor at recommended: an in-range managed binary is never upgraded to
     # recommended (auto-install and the "up to date" status both gate on range, not
     # recommended), so a lower floor strands old installs.
-    min_version="2.1.306",
+    min_version="2.1.321",
     max_version="2.99.99",
     # Recommended is the latest validated release. It has to be one whose model table
     # carries every `--model` id the picker offers, which is ahead of the `stable`
     # channel whenever a new model generation has just shipped.
-    recommended_version="2.1.306",
+    recommended_version="2.1.321",
     # Blocked versions create background tool invocations that are missing events
     # describing them.
     blocked_versions=(BlockedVersionRange(min_version="2.1.101", max_version="2.1.101"),),
@@ -361,11 +446,11 @@ class ClaudeManagedTool(ManagedTool):
         return staged
 
 
-# Both Claude and pi conform to the seam; unmanaged tools (e.g. ``GIT``) stay absent
-# so ``get_managed_tool`` returns None for them.
+# Unmanaged tools (e.g. ``GIT``) stay absent so ``get_managed_tool`` returns None for them.
 _MANAGED_TOOL_REGISTRY: dict[Dependency, ManagedTool] = {
     Dependency.CLAUDE: ClaudeManagedTool(),
     Dependency.PI: PiManagedTool(),
+    Dependency.JJ: JjManagedTool(),
 }
 
 

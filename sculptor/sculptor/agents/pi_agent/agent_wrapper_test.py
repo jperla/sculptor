@@ -291,7 +291,7 @@ def _make_start_env(persisted_session_id: str | None = None) -> MagicMock:
     env.get_tool_binary_path.return_value = "/bin/pi"
     version_result = MagicMock()
     version_result.stdout = ""
-    version_result.stderr = "pi 1.3.0\n"
+    version_result.stderr = "pi 1.5.2\n"
     env.run_process_to_completion.return_value = version_result
     env.get_state_path.return_value = Path("/fake/state")
     env.get_system_prompt.return_value = ""
@@ -391,7 +391,7 @@ def _agent_with_skill_dirs(
     env.get_user_home_directory.return_value = home_dir
     env.get_state_path.return_value = state_dir
     # Patch where it's looked up: agent_wrapper imports get_plugin_dirs at module level.
-    monkeypatch.setattr("sculptor.agents.pi_agent.agent_wrapper.get_plugin_dirs", lambda: plugin_dirs)
+    monkeypatch.setattr("sculptor.agents.pi_agent.agent_wrapper.get_plugin_dirs", lambda vcs_kind: plugin_dirs)
     return _make_agent(environment=env)
 
 
@@ -697,7 +697,7 @@ def _make_probe_env(probe_process: MagicMock) -> MagicMock:
     env.get_tool_binary_path.return_value = "/bin/pi"
     version_result = MagicMock()
     version_result.stdout = ""
-    version_result.stderr = "pi 1.3.0\n"
+    version_result.stderr = "pi 1.5.2\n"
     env.run_process_to_completion.return_value = version_result
     env.get_state_path.return_value = Path("/fake/state")
     env.run_process_in_background.return_value = probe_process
@@ -2522,7 +2522,7 @@ class TestStartAndSessionResume:
         agent = _make_agent(env)
         with pytest.raises(PiVersionMismatchError) as exc_info:
             agent.start(secrets={})
-        assert exc_info.value.pinned_version == "1.3.0"
+        assert exc_info.value.pinned_version == "1.5.2"
         assert exc_info.value.detected_version == "0.50.0"
         # The message must point the user at the self-healing fix (managed install).
         assert "Managed" in str(exc_info.value)

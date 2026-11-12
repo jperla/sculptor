@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { createStore, Provider as JotaiProvider } from "jotai";
 import type { ReactElement } from "react";
 
-import type { DependenciesStatus, DependencyInfo } from "~/api";
+import type { DependenciesStatus, DependencyInfo, JjReadiness } from "~/api";
 import { dependenciesStatusAtom } from "~/common/state/atoms/dependenciesStatus";
 
 import { DependenciesSettingsSection } from "./DependenciesSettingsSection";
@@ -13,7 +13,7 @@ const piNotInstalled = {
   version: null,
   isOverride: false,
   mode: null,
-  versionRange: { minVersion: "1.3.0", maxVersion: "1.3.0", recommendedVersion: "1.3.0" },
+  versionRange: { minVersion: "1.5.2", maxVersion: "1.5.2", recommendedVersion: "1.5.2" },
   isVersionInRange: null,
 } as const;
 
@@ -26,6 +26,8 @@ const optionalCliNotInstalled: DependencyInfo = {
   versionRange: null,
   isVersionInRange: null,
 };
+
+const jjNotInstalled: JjReadiness = { blocker: "NOT_INSTALLED" };
 
 const ghInstalled: DependencyInfo = {
   installed: true,
@@ -71,6 +73,8 @@ const managedUpToDate: DependenciesStatus = {
   },
   pi: piNotInstalled,
   gh: optionalCliNotInstalled,
+  jj: optionalCliNotInstalled,
+  jjReadiness: jjNotInstalled,
   voiceModels: optionalCliNotInstalled,
 };
 
@@ -96,6 +100,8 @@ const managedOutOfRange: DependenciesStatus = {
   },
   pi: piNotInstalled,
   gh: optionalCliNotInstalled,
+  jj: optionalCliNotInstalled,
+  jjReadiness: jjNotInstalled,
   voiceModels: optionalCliNotInstalled,
 };
 
@@ -120,6 +126,8 @@ const pathMode: DependenciesStatus = {
   },
   pi: piNotInstalled,
   gh: optionalCliNotInstalled,
+  jj: optionalCliNotInstalled,
+  jjReadiness: jjNotInstalled,
   voiceModels: optionalCliNotInstalled,
 };
 
@@ -144,6 +152,8 @@ const customMode: DependenciesStatus = {
   },
   pi: piNotInstalled,
   gh: optionalCliNotInstalled,
+  jj: optionalCliNotInstalled,
+  jjReadiness: jjNotInstalled,
   voiceModels: optionalCliNotInstalled,
 };
 
@@ -168,6 +178,8 @@ const notInstalled: DependenciesStatus = {
   },
   pi: piNotInstalled,
   gh: optionalCliNotInstalled,
+  jj: optionalCliNotInstalled,
+  jjReadiness: jjNotInstalled,
   voiceModels: optionalCliNotInstalled,
 };
 
@@ -210,6 +222,8 @@ const managedUpgradeFailed: DependenciesStatus = {
   },
   pi: piNotInstalled,
   gh: optionalCliNotInstalled,
+  jj: optionalCliNotInstalled,
+  jjReadiness: jjNotInstalled,
   voiceModels: optionalCliNotInstalled,
 };
 

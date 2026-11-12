@@ -21,6 +21,7 @@ from typing import cast
 import pytest
 from pydantic import PrivateAttr
 
+from sculptor.agents.default.constants import DEFAULT_LLM_MODEL
 from sculptor.config.user_config import BabysitterAgentClaude
 from sculptor.config.user_config import BabysitterAgentMRU
 from sculptor.config.user_config import BabysitterAgentPi
@@ -57,6 +58,7 @@ from sculptor.services.ci_babysitter_service.coordinator import CIBabysitterCoor
 from sculptor.services.ci_babysitter_service.coordinator import ChatAgent
 from sculptor.services.ci_babysitter_service.coordinator import Disabled
 from sculptor.services.ci_babysitter_service.coordinator import DriveableTerminal
+from sculptor.services.ci_babysitter_service.coordinator import _model_from_config_or_fallback
 from sculptor.services.ci_babysitter_service.transitions import Transition
 from sculptor.services.data_model_service.api import DataModelService
 from sculptor.services.data_model_service.data_types import DataModelTransaction
@@ -65,6 +67,7 @@ from sculptor.services.git_repo_service.git_repos import ReadOnlyGitRepo
 from sculptor.services.task_service.api import TaskService
 from sculptor.services.terminal_agent_registry.registry import TerminalAgentRegistration
 from sculptor.services.workspace_service.api import WorkspaceService
+from sculptor.services.workspace_service.vcs.git_cli import GitCli
 from sculptor.state.messages import ChatInputUserMessage
 from sculptor.state.messages import LLMModel
 from sculptor.state.messages import Message
@@ -541,6 +544,7 @@ def _build_coordinator(
         concurrency_group=concurrency_group,
         data_model_service=data_model_service,
         workspace_service=workspace_service,
+        git_cli=GitCli(concurrency_group, lambda tool: None),
     )
     coordinator = CIBabysitterCoordinator(
         concurrency_group=concurrency_group,
@@ -1511,6 +1515,10 @@ def test_transient_reason_clears_on_pipeline_passed(
 
     coordinator._handle_status(_make_status(env.workspace_id, pipeline_status="passed", pipeline_id=1))
     assert state.transient_disabled_reason is None
+
+
+def test_model_fallback_is_the_product_default_when_settings_name_no_model() -> None:
+    assert _model_from_config_or_fallback(_make_user_config()) == DEFAULT_LLM_MODEL
 
 
 def test_select_model_for_workspace_skips_terminal_agents(

@@ -3,7 +3,7 @@ import { atomWithStorage } from "jotai/utils";
 
 import { NIGHT_MODE_OFF } from "~/common/nightMode.ts";
 import { getTelemetryEnabled } from "~/common/telemetry/telemetry.ts";
-import { DEFAULT_LLM_MODEL } from "~/common/utils/modelConstants.ts";
+import { DEFAULT_LLM_MODEL, modelForNewRecord } from "~/common/utils/modelConstants.ts";
 
 import type { CiBabysitterConfig, CustomActionsConfig, UserConfig } from "../../../api";
 import { LlmModel } from "../../../api";
@@ -54,16 +54,23 @@ export const isAlwaysInterruptAndSendAtom = atom<boolean>(
 
 export const lastUsedModelAtom = atomWithStorage<string | null>("sculptor-last-used-model", null);
 
-export const configuredDefaultModelAtom = atom<string | null>((get) => get(userConfigAtom)?.defaultLlm ?? null);
+// The "Default model" setting as new agents apply it, or null for "Most Recently
+// Used". Settings shows this value, so it always names the model new agents get.
+export const configuredDefaultModelAtom = atom<LlmModel | null>((get) => {
+  const configuredDefaultModel = get(userConfigAtom)?.defaultLlm;
+  return configuredDefaultModel && isLlmModel(configuredDefaultModel)
+    ? modelForNewRecord(configuredDefaultModel)
+    : null;
+});
 
 export const defaultModelAtom = atom<string>((get) => {
   const configuredDefaultModel = get(configuredDefaultModelAtom);
-  if (configuredDefaultModel && isLlmModel(configuredDefaultModel)) {
+  if (configuredDefaultModel) {
     return configuredDefaultModel;
   }
   const lastUsedModel = get(lastUsedModelAtom);
   if (lastUsedModel && isLlmModel(lastUsedModel)) {
-    return lastUsedModel;
+    return modelForNewRecord(lastUsedModel);
   }
   return DEFAULT_LLM_MODEL;
 });
@@ -112,6 +119,10 @@ export const isPrPollingEnabledAtom = atom<boolean>((get) => get(userConfigAtom)
 export const prPollIntervalAtom = atom<number>((get) => get(userConfigAtom)?.prPollIntervalSeconds ?? 30);
 
 export const prPollClosedMultiplierAtom = atom<number>((get) => get(userConfigAtom)?.prPollClosedMultiplier ?? 6);
+
+export const jjSnapshotMaxNewFileSizeMibAtom = atom<number>(
+  (get) => get(userConfigAtom)?.jjSnapshotMaxNewFileSizeMib ?? 10,
+);
 
 // CI Babysitter settings (experimental). The full nested config lives under
 // userConfig.ciBabysitter on the backend; individual atoms below derive from

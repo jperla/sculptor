@@ -7,10 +7,12 @@ from typing import Annotated
 from typing import Any
 from typing import Literal
 
+from pydantic import AfterValidator
 from pydantic import EmailStr
 from pydantic import Field
 from pydantic import Tag
 from pydantic import model_validator
+from typing_extensions import TypeAliasType
 
 from sculptor.agents.pi_agent.provider_catalog import ProviderGroup
 from sculptor.config.naming_convention_files import NamingConventionTier
@@ -33,6 +35,7 @@ from sculptor.state.messages import EffortLevel
 from sculptor.state.messages import LLMModel
 from sculptor.state.messages import Message
 from sculptor.state.messages import ModelOption
+from sculptor.state.messages import model_for_new_record
 
 
 class TaskInterface(StrEnum):
@@ -53,10 +56,19 @@ class AgentTypeName(StrEnum):
 
 
 class WorkspaceBranchInfo(SerializableModel):
-    """Current branch for a workspace's working directory."""
+    """Current branch for a workspace's working directory, or why it cannot be read."""
 
-    current_branch: str
+    current_branch: str | None = Field(description="None exactly when checkout_problem is set")
     workspace_id: WorkspaceID
+    checkout_problem: str | None = Field(
+        default=None, description="Why the checkout's branch cannot be read, e.g. it is not a git checkout"
+    )
+
+    @model_validator(mode="after")
+    def _require_exactly_one_of_branch_and_checkout_problem(self) -> "WorkspaceBranchInfo":
+        if (self.current_branch is None) == (self.checkout_problem is None):
+            raise ValueError("exactly one of current_branch and checkout_problem must be set")
+        return self
 
 
 class WorkspaceTargetBranchesInfo(SerializableModel):
@@ -130,21 +142,22 @@ class RequestModel(SerializableModel):
     pass
 
 
+# The model a request creates records with. A retired 200K variant from a stale client
+# is stored as its 1M sibling (see `model_for_new_record`).
+NewRecordLLMModel = Annotated[LLMModel, AfterValidator(model_for_new_record)]
+
+
 class StartTaskRequest(RequestModel):
     prompt: str
     interface: str = TaskInterface.TERMINAL.value
     # Mutually exclusive, one per harness's terms — the same pair as
     # CreateAgentRequest, validated per resolved harness
     # (`_validate_prompt_model_selection`).
-    model: LLMModel | None = None
+    model: NewRecordLLMModel | None = None
     backend_model: ModelOption | None = None
     files: list[str] = Field(default_factory=list)
-    # Strategy for the workspace this task creates; IN_PLACE when omitted.
-    initialization_strategy: WorkspaceInitializationStrategy | None = None
     name: str | None = None
-    source_branch: str | None = None
-    # Runs the task in this existing workspace instead of creating one, so it is
-    # mutually exclusive with initialization_strategy and source_branch.
+    # Optional in the type, but `start_task` rejects a request without one.
     workspace_id: WorkspaceID | None = None
     enter_plan_mode: bool = False
     fast_mode: bool = False
@@ -154,14 +167,6 @@ class StartTaskRequest(RequestModel):
     # resolves it). Prompt-ful creation is always a chat agent; terminal types
     # are rejected (422).
     agent_type: AgentTypeName | None = None
-
-    @model_validator(mode="after")
-    def _reject_workspace_creation_fields_with_workspace_id(self) -> "StartTaskRequest":
-        if self.workspace_id is not None and (
-            self.initialization_strategy is not None or self.source_branch is not None
-        ):
-            raise ValueError("workspace_id is mutually exclusive with initialization_strategy and source_branch")
-        return self
 
 
 class CreateWorkspaceRequestV2(RequestModel):
@@ -198,7 +203,7 @@ class CreateAgentRequest(RequestModel):
     # `backend_model` (the chosen `ModelOption`) for a backend-sourced catalog
     # (pi). A pi prompt requires `backend_model`; a promptless create must not
     # carry one (post-start selection owns that case).
-    model: LLMModel | None = None
+    model: NewRecordLLMModel | None = None
     backend_model: ModelOption | None = None
     interface: str = TaskInterface.TERMINAL.value
     files: list[str] = Field(default_factory=list)
@@ -445,7 +450,7 @@ class ListWorkspacesResponse(SerializableModel):
 
 class SendMessageRequest(RequestModel):
     message: str
-    model: LLMModel
+    model: NewRecordLLMModel
     files: list[str] = Field(default_factory=list)
     enter_plan_mode: bool = False
     exit_plan_mode: bool = False
@@ -459,7 +464,7 @@ class AnswerQuestionRequest(RequestModel):
     notes: dict[str, str] = Field(default_factory=dict)
     question_data: AskUserQuestionData
     tool_use_id: str
-    model: LLMModel
+    model: NewRecordLLMModel
 
 
 class BtwRequest(RequestModel):
@@ -858,6 +863,76 @@ class SubmitAuthCodeRequest(RequestModel):
     tool: str = "CLAUDE"
 
 
+class JjBlocker(UpperCaseStrEnum):
+    """Why jj is unavailable to Sculptor."""
+
+    NOT_INSTALLED = auto()
+    NOT_RUNNABLE = auto()
+    UNSUPPORTED_VERSION = auto()
+    NO_IDENTITY = auto()
+
+
+class JjIdentity(SerializableModel):
+    """The author jj records on changes: its ``user.name`` and ``user.email``."""
+
+    name: str
+    email: str
+
+
+class SetJjIdentityRequest(RequestModel):
+    """Write the author identity into the user's jj config."""
+
+    name: str = Field(min_length=1)
+    email: str = Field(min_length=1)
+
+
+class JjAvailable(SerializableModel):
+    """jj passed every readiness check."""
+
+    blocker: None
+    # The identity jj gives agents.
+    identity: JjIdentity
+
+
+class JjNotInstalled(SerializableModel):
+    """No jj binary resolves from the configured binary source."""
+
+    blocker: Literal[JjBlocker.NOT_INSTALLED]
+
+
+class JjNotRunnable(SerializableModel):
+    """A jj binary resolves, but running it fails."""
+
+    blocker: Literal[JjBlocker.NOT_RUNNABLE]
+    # The first line jj printed to stderr, else how the command failed.
+    error: str | None
+
+
+class JjUnsupportedVersion(SerializableModel):
+    """The resolved jj is outside the versions Sculptor supports."""
+
+    blocker: Literal[JjBlocker.UNSUPPORTED_VERSION]
+    path: str
+    # None when ``jj --version`` printed no recognizable version.
+    version: str | None
+
+
+class JjNoIdentity(SerializableModel):
+    """jj runs, but its ``user.name`` or ``user.email`` is unset."""
+
+    blocker: Literal[JjBlocker.NO_IDENTITY]
+    # Prefill for the identity form: whatever half jj already has, completed from
+    # git's global identity. Either half may be empty.
+    suggested_identity: JjIdentity
+
+
+# JJ_AVAILABLE: jj is available to Sculptor exactly when ``blocker`` is None. It is derived
+# on demand and never stored.
+JjReadiness = TypeAliasType(
+    "JjReadiness", JjAvailable | JjNotInstalled | JjNotRunnable | JjUnsupportedVersion | JjNoIdentity
+)
+
+
 class DependenciesStatus(SerializableModel):
     """Status of required dependencies with path/version info."""
 
@@ -865,6 +940,8 @@ class DependenciesStatus(SerializableModel):
     claude: DependencyInfo
     pi: DependencyInfo
     gh: DependencyInfo
+    jj: DependencyInfo
+    jj_readiness: JjReadiness
     # The renderer's speech-to-text model bundle — a managed artifact (data
     # files, no binary), so only its installed/version/progress/error fields
     # are meaningful.
