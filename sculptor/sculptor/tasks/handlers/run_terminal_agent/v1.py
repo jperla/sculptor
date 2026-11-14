@@ -18,17 +18,19 @@ from __future__ import annotations
 import datetime
 from typing import Any
 from typing import Callable
+from typing import assert_never
 from typing import cast
 
 from loguru import logger
 
-from sculptor.common.plugin import get_terminal_agent_plugin_env
+from sculptor.common.plugin import get_plugins_base_dir
 from sculptor.config.settings import SculptorSettings
 from sculptor.database.models import AgentTaskInputsV2
 from sculptor.database.models import AgentTaskStateV2
 from sculptor.database.models import Project
 from sculptor.database.models import Task
 from sculptor.database.models import TaskID
+from sculptor.database.workspace_enums import WorkspaceInitializationStrategy
 from sculptor.foundation.concurrency_group import ConcurrencyExceptionGroup
 from sculptor.foundation.concurrency_group import ConcurrencyGroup
 from sculptor.foundation.event_utils import ReadOnlyEvent
@@ -44,6 +46,11 @@ from sculptor.services.task_service.errors import UserPausedTaskError
 from sculptor.services.workspace_service.environment_manager.environments.local_agent_execution_environment import (
     LocalAgentExecutionEnvironment,
 )
+from sculptor.services.workspace_service.vcs.data_types import CheckoutLocation
+from sculptor.services.workspace_service.vcs.git_cli import BinaryResolver
+from sculptor.services.workspace_service.vcs.git_cli import GitCli
+from sculptor.services.workspace_service.vcs.git_workspace_vcs import GitWorkspaceVcs
+from sculptor.services.workspace_service.vcs.interfaces import WorkspaceVcs
 from sculptor.tasks.handlers.run_agent.setup import load_initial_task_state
 from sculptor.tasks.handlers.run_agent.v1 import on_exception
 from sculptor.tasks.handlers.run_terminal_agent.diff_refresh import PeriodicDiffRefresher
@@ -201,7 +208,7 @@ def _run_terminal_agent_in_environment(
     # scrubs inherited SCULPT_*/SCULPTOR_* vars and re-applies extra_env (PATH
     # is prepended), so everything must go through extra_env.
     #
-    # The plugin dirs and SCULPT_CLAUDE_BIN exist for registration launch
+    # SCULPT_PLUGINS_DIR and SCULPT_CLAUDE_BIN exist for registration launch
     # commands (shell-expanded at launch): install-relative paths move on app
     # updates — and on every AppImage launch — so a registration file cannot
     # bake them in.
@@ -212,7 +219,7 @@ def _run_terminal_agent_in_environment(
             project_id=project.object_id,
             agent_id=task.object_id,
         ),
-        **get_terminal_agent_plugin_env("git"),
+        "SCULPT_PLUGINS_DIR": str(get_plugins_base_dir()),
         # Managed binary when resolvable; bare `claude` (PATH) as fallback so
         # the command still works for users who manage their own install.
         "SCULPT_CLAUDE_BIN": claude_binary_path or "claude",
@@ -263,8 +270,16 @@ def _run_terminal_agent_in_environment(
         if on_started is not None:
             on_started()
 
+        vcs = _make_workspace_vcs(
+            underlying_env.get_initialization_strategy(),
+            services.dependency_management_service.resolve_binary_path,
+            environment_concurrency_group,
+        )
+        checkout = CheckoutLocation(
+            repo_path=project.get_local_user_path(), checkout_path=underlying_env.get_working_directory()
+        )
         refresher = PeriodicDiffRefresher(
-            working_directory=underlying_env.get_working_directory(),
+            compute_fingerprint=lambda: vcs.compute_change_fingerprint(checkout),
             on_change=lambda: services.workspace_service.maybe_refresh_workspace_diff(task_state.workspace_id),
             interval_seconds=_DIFF_REFRESH_INTERVAL_SECONDS,
         )
@@ -279,3 +294,21 @@ def _run_terminal_agent_in_environment(
     finally:
         stop_agent_terminal(task.object_id)
         unregister_agent_terminal_config(task.object_id)
+
+
+def _make_workspace_vcs(
+    initialization_strategy: WorkspaceInitializationStrategy,
+    resolve_binary: BinaryResolver,
+    concurrency_group: ConcurrencyGroup,
+) -> WorkspaceVcs:
+    match initialization_strategy:
+        case (
+            WorkspaceInitializationStrategy.IN_PLACE
+            | WorkspaceInitializationStrategy.CLONE
+            | WorkspaceInitializationStrategy.WORKTREE
+        ):
+            return GitWorkspaceVcs(
+                initialization_strategy, GitCli(concurrency_group, resolve_binary), concurrency_group
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
